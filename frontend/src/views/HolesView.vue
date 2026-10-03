@@ -99,6 +99,13 @@
           plain
           @click.stop="gotoHandover(h)"
         >终孔交接</el-button>
+        <el-button
+          class="dc-hole-handover-btn"
+          size="small"
+          type="primary"
+          plain
+          @click.stop="gotoSample(h)"
+        >取样登记</el-button>
       </div>
     </div>
 
@@ -134,6 +141,7 @@ import { ElMessage } from 'element-plus'
 import { api } from '../api'
 import { setDetail } from '../detail'
 import { openHandoverForHole } from '../handover-nav'
+import { openSamplesForHole } from '../sample-nav'
 
 const mines = ref([])
 const stats = ref([])
@@ -222,6 +230,12 @@ function openCreate() {
 /** 从施工钻孔直接进入终孔交接台（班组视角选中该孔） */
 function gotoHandover(h) {
   const tab = openHandoverForHole(h.id)
+  window.dispatchEvent(new CustomEvent('dc:navigate', { detail: { tab } }))
+}
+
+/** 从孔资料进入取样送检（现场取样视角选中该孔） */
+function gotoSample(h) {
+  const tab = openSamplesForHole(h.id)
   window.dispatchEvent(new CustomEvent('dc:navigate', { detail: { tab } }))
 }
 

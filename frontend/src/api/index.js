@@ -80,5 +80,21 @@ export const api = {
   resubmitHandover: (id, body) => unwrap(http.post(`/handovers/${id}/resubmit`, body || {})),
   rejectHandover: (id, body) => unwrap(http.post(`/handovers/${id}/reject`, body)),
   acceptHandover: (id, body) => unwrap(http.post(`/handovers/${id}/accept`, body || {})),
-  reopenHandover: (id, body) => unwrap(http.post(`/handovers/${id}/reopen`, body))
+  reopenHandover: (id, body) => unwrap(http.post(`/handovers/${id}/reopen`, body)),
+
+  // 岩芯样品取样与送检
+  samples: (params) => unwrap(http.get('/core-samples', qs(params))),
+  packableSamples: (boreholeId) =>
+    unwrap(http.get('/core-samples/packable', qs(boreholeId ? { boreholeId } : {}))),
+  sample: (id) => unwrap(http.get(`/core-samples/${id}`)),
+  createSample: (body) => unwrap(http.post('/core-samples', body)),
+  updateSample: (id, body) => unwrap(http.put(`/core-samples/${id}`, body)),
+  deleteSample: (id, expectedVersion) =>
+    unwrap(http.delete(`/core-samples/${id}`, qs(expectedVersion != null ? { expectedVersion } : {}))),
+
+  sampleBatches: (status) => unwrap(http.get('/sample-batches', qs(status ? { status } : {}))),
+  sampleBatchDetail: (id) => unwrap(http.get(`/sample-batches/${id}`)),
+  packBatch: (body) => unwrap(http.post('/sample-batches/pack', body)),
+  receiveBatch: (id, body) => unwrap(http.post(`/sample-batches/${id}/receive`, body)),
+  returnBatch: (id, body) => unwrap(http.post(`/sample-batches/${id}/return`, body))
 }

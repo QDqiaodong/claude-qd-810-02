@@ -12,6 +12,10 @@ CREATE DATABASE IF NOT EXISTS drill_crew
   DEFAULT COLLATE utf8mb4_unicode_ci;
 USE drill_crew;
 
+DROP TABLE IF EXISTS sample_batch_event;
+DROP TABLE IF EXISTS sample_batch_item;
+DROP TABLE IF EXISTS sample_batch;
+DROP TABLE IF EXISTS core_sample;
 DROP TABLE IF EXISTS handover_issue;
 DROP TABLE IF EXISTS handover;
 DROP TABLE IF EXISTS shift_report;
@@ -210,6 +214,110 @@ CREATE TABLE handover_issue (
   PRIMARY KEY (id),
   KEY idx_issue_handover (handover_id),
   KEY idx_issue_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------- 11. 岩芯样品（现场取样登记） ----------------------------
+-- 关键信息（样品编号/起止深度/取样人/封签号）齐全才能登记为 REGISTERED；
+-- 缺关键信息只保存 DRAFT 草稿，草稿不参与孔段重叠校验、不能加入送检批次。
+-- status：DRAFT 草稿 / REGISTERED 已登记待送检 / IN_TRANSIT 运输中 /
+--         RECEIVED 实验室已接收 / ABNORMAL 部分接收时标出的待补样品
+-- 同孔正式样品（非草稿）孔段不得重叠，由应用层校验 + 编号/封签唯一索引兜底。
+CREATE TABLE core_sample (
+  id            BIGINT       NOT NULL AUTO_INCREMENT,
+  borehole_id   BIGINT       NOT NULL COMMENT '所属钻孔',
+  sample_no     VARCHAR(40)  DEFAULT NULL COMMENT '样品编号（草稿可空，正式唯一）',
+  from_depth    DECIMAL(8,2) DEFAULT NULL COMMENT '起始深度 m',
+  to_depth      DECIMAL(8,2) DEFAULT NULL COMMENT '终止深度 m',
+  sampler       VARCHAR(32)  DEFAULT NULL COMMENT '取样人',
+  seal_no       VARCHAR(40)  DEFAULT NULL COMMENT '封签号（草稿可空，正式唯一）',
+  sample_type   VARCHAR(24)  DEFAULT NULL COMMENT '样品类型 岩芯/岩屑/水样/矿化样',
+  status        VARCHAR(12)  NOT NULL COMMENT 'DRAFT/REGISTERED/IN_BATCH/IN_TRANSIT/RECEIVED/RETURNED',
+  remark        VARCHAR(255) DEFAULT NULL COMMENT '备注',
+  batch_id      BIGINT       DEFAULT NULL COMMENT '当前所在批次（历史事件在 sample_batch_event 可追溯）',
+  registered_at DATETIME     DEFAULT NULL COMMENT '登记为正式样品时间',
+  created_at    DATETIME     DEFAULT CURRENT_TIMESTAMP COMMENT '首次保存（草稿）时间',
+  updated_at    DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  lock_version  INT          NOT NULL DEFAULT 0 COMMENT '乐观锁：重复点击/并发保存后提交者看到数据已变化',
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_sample_no (sample_no),
+  UNIQUE KEY uk_sample_seal (seal_no),
+  KEY idx_sample_hole (borehole_id),
+  KEY idx_sample_status (status),
+  KEY idx_sample_batch (batch_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------- 12. 送检批次（封样运输 / 实验室接收） ----------------------------
+-- 批次一旦创建即进入 IN_TRANSIT（封样运输），不可再向其中增删样品；
+-- 实验室接收时逐样核对【状态正确 + 数量一致 + 封签一致】：
+--   全部一致 → RECEIVED，样品置 RECEIVED；
+--   存在异常 → PARTIAL_RECEIVED，一致样品照样接收（RECEIVED），异常样品标 ABNORMAL 待补；
+--   整批退回 → RETURNED，样品退回 REGISTERED 可重新组批。
+-- status：IN_TRANSIT 运输中 / RECEIVED 已接收 / PARTIAL_RECEIVED 部分接收 / RETURNED 已退回
+CREATE TABLE sample_batch (
+  id              BIGINT       NOT NULL AUTO_INCREMENT,
+  batch_no        VARCHAR(40)  NOT NULL COMMENT '批次编号（自动生成，唯一）',
+  status          VARCHAR(18)  NOT NULL COMMENT 'IN_TRANSIT/RECEIVED/PARTIAL_RECEIVED/RETURNED',
+  expected_count  INT          NOT NULL COMMENT '封样时样品数量（接收时必须与实到数量核对）',
+  received_count  INT          NOT NULL DEFAULT 0 COMMENT '已接收样品数',
+  abnormal_count  INT          NOT NULL DEFAULT 0 COMMENT '异常样品数（待补项）',
+  packer          VARCHAR(32)  DEFAULT NULL COMMENT '封样人',
+  carrier         VARCHAR(32)  DEFAULT NULL COMMENT '运输/送样人',
+  pack_note       VARCHAR(255) DEFAULT NULL COMMENT '封样运输说明',
+  packed_at       DATETIME     DEFAULT NULL COMMENT '封样发运时间',
+  receiver        VARCHAR(32)  DEFAULT NULL COMMENT '实验室接收人',
+  received_at     DATETIME     DEFAULT NULL COMMENT '实验室接收时间（回写）',
+  receive_note    VARCHAR(255) DEFAULT NULL COMMENT '接收总说明 / 异常说明',
+  return_reason   VARCHAR(255) DEFAULT NULL COMMENT '整批退回原因',
+  returned_at     DATETIME     DEFAULT NULL COMMENT '整批退回时间',
+  lock_version    INT          NOT NULL DEFAULT 0 COMMENT '乐观锁：防止重复交接/重复接收产生重复记录',
+  created_at      DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_batch_no (batch_no),
+  KEY idx_batch_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------- 13. 批次样品明细（封样时定稿的快照） ----------------------------
+-- 每行是批次中的一个样品：封样时记录封签号、孔段快照，供实验室逐项核对；
+-- 接收阶段回写每行接收结果（行级异常说明），部分接收时保留已接收行。
+-- 同一批次内一个样品只出现一次；整批退回后样品可重新组批（新批次产生新明细行），
+-- 旧批次的退回明细继续保留留痕，故唯一键为 (batch_id, sample_id)。
+-- item_status：PENDING 待接收 / RECEIVED 已接收 / ABNORMAL 异常待补 / RETURNED 随批退回
+CREATE TABLE sample_batch_item (
+  id                BIGINT       NOT NULL AUTO_INCREMENT,
+  batch_id          BIGINT       NOT NULL,
+  sample_id         BIGINT       NOT NULL,
+  sample_no         VARCHAR(40)  NOT NULL COMMENT '样品编号快照',
+  borehole_id       BIGINT       NOT NULL COMMENT '钻孔（明细展示用）',
+  from_depth        DECIMAL(8,2) NOT NULL COMMENT '起始深度快照 m',
+  to_depth          DECIMAL(8,2) NOT NULL COMMENT '终止深度快照 m',
+  seal_no          VARCHAR(40)  NOT NULL COMMENT '封签号快照（实验室核对依据）',
+  item_status       VARCHAR(10)  NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/RECEIVED/ABNORMAL/RETURNED',
+  abnormal_note     VARCHAR(255) DEFAULT NULL COMMENT '行级异常说明（数量不符/封签破损/封签不符…）',
+  received_at       DATETIME     DEFAULT NULL COMMENT '本行接收时间',
+  receiver          VARCHAR(32)  DEFAULT NULL COMMENT '本行接收人',
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_item_batch_sample (batch_id, sample_id),
+  KEY idx_item_sample (sample_id),
+  KEY idx_item_batch (batch_id),
+  KEY idx_item_status (item_status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------- 14. 批次交接事件（历史交接结果可追溯） ----------------------------
+-- 封样发运 / 整批退回 / 全部接收 / 部分接收 每发生一次追加一行，只增不改；
+-- 批次明细与样品当前状态可能随后续处理变化，本表永久保留每次交接的结论与操作痕迹。
+CREATE TABLE sample_batch_event (
+  id               BIGINT       NOT NULL AUTO_INCREMENT,
+  batch_id         BIGINT       NOT NULL,
+  event_type       VARCHAR(18)  NOT NULL COMMENT 'PACK/RECEIVE/PARTIAL_RECEIVE/RETURN',
+  event_status     VARCHAR(18)  NOT NULL COMMENT '事件发生后批次状态',
+  sample_count     INT          NOT NULL DEFAULT 0 COMMENT '涉及样品数',
+  received_count   INT          NOT NULL DEFAULT 0 COMMENT '其中已接收数',
+  abnormal_count   INT          NOT NULL DEFAULT 0 COMMENT '其中异常数',
+  operator         VARCHAR(32)  DEFAULT NULL COMMENT '操作人（封样人/接收人）',
+  note             VARCHAR(255) DEFAULT NULL COMMENT '说明 / 退回原因 / 异常概述',
+  event_at         DATETIME     NOT NULL COMMENT '事件时间',
+  PRIMARY KEY (id),
+  KEY idx_event_batch (batch_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 SET FOREIGN_KEY_CHECKS = 1;
@@ -593,3 +701,52 @@ INSERT INTO shift_report (borehole_id, rig_id, crew_id, report_date, shift_type,
 (12,6,8,'2024-07-11','中', 22.30, 5.80, 1.60,'无事故，封孔前最后一个班',
  '[{"category":"钻头","name":"金刚石钻头","spec":"Φ75 mm","qty":1,"unit":"个"},{"category":"泥浆材料","name":"水泥","spec":"P.O 42.5","qty":10,"unit":"袋"}]',
  '已达设计孔深，准备封孔，封孔材料已到位','刘铁柱');
+
+-- ---------------------------- 岩芯样品（12，含 2 条草稿） ----------------------------
+INSERT INTO core_sample (id, borehole_id, sample_no, from_depth, to_depth, sampler, seal_no, sample_type, status, remark, batch_id, registered_at, created_at, updated_at, lock_version) VALUES
+-- ZK-2401：矿化带 / 蚀变带 / 石英脉 化学样（批次1，已接收）
+(1, 1,'HQ-2401-H01',442.00,445.00,'马三保','FS-2401-01','矿化样','RECEIVED','方铅矿细脉段，劈芯取样半芯',1,'2024-05-27 10:20:00','2024-05-27 10:20:00','2024-06-03 15:06:00',2),
+(2, 1,'HQ-2401-H02',480.00,483.00,'马三保','FS-2401-02','矿化样','RECEIVED','矿化最强部位，加密取样',1,'2024-05-28 09:10:00','2024-05-28 09:10:00','2024-06-03 15:06:00',2),
+(3, 1,'HQ-2401-H03',360.00,363.00,'刘铁柱','FS-2401-03','岩芯','RECEIVED','蚀变带黄铁矿浸染样',1,'2024-05-29 14:40:00','2024-05-29 14:40:00','2024-06-03 15:06:00',2),
+-- ZK-2403：施工中，花岗岩/砂岩样（批次2，运输中）
+(4, 3,'HQ-2403-H01',220.00,223.00,'周立军','FS-2403-01','岩芯','IN_TRANSIT','中粒花岗岩岩组鉴定样',2,'2024-08-13 08:30:00','2024-08-13 08:30:00','2024-08-20 07:50:00',1),
+(5, 3,'HQ-2403-H02',150.00,153.00,'周立军','FS-2403-02','岩屑','IN_TRANSIT','砂岩薄片鉴定样',2,'2024-08-16 16:00:00','2024-08-16 16:00:00','2024-08-20 07:50:00',1),
+-- ZK-3103：铜镍矿化（批次3，部分接收：1 接收 / 1 封签破损待补）
+(6, 7,'HQ-3103-H01',360.00,363.00,'周立军','FS-3103-01','矿化样','RECEIVED','黄铜矿-镍黄铁矿细脉',3,'2024-05-06 11:00:00','2024-05-06 11:00:00','2024-05-12 10:20:00',2),
+(7, 7,'HQ-3103-H02',450.00,453.00,'周立军','FS-3103-02','矿化样','ABNORMAL','到达实验室时封签破损，箱内样品可辨，待补封签',3,'2024-05-07 09:30:00','2024-05-07 09:30:00','2024-05-12 10:20:00',2),
+-- ZK-2402：曾整批退回，样品回到待送检（批次4，已退回）
+(8, 2,'HQ-2402-H01',260.00,263.00,'马三保','FS-2402-01','岩芯','REGISTERED','片麻岩岩组样',NULL,'2024-06-20 10:00:00','2024-06-20 10:00:00','2024-06-28 17:30:00',3),
+-- 待送检散样
+(9, 5,'HQ-3101-H01',660.00,663.00,'陈大勇','FS-3101-01','岩芯','REGISTERED','花岗岩基底定名样',NULL,'2023-10-20 11:00:00','2023-10-20 11:00:00','2023-10-20 11:00:00',0),
+(10,9,'HQ-5202-H01',120.00,123.00,'黄志刚','FS-5202-01','岩芯','REGISTERED','二长花岗岩同位素样',NULL,'2024-05-22 10:00:00','2024-05-22 10:00:00','2024-05-22 10:00:00',0),
+-- 草稿（关键信息不全：1 缺样品编号与封签；1 缺取样人）
+(11,3,NULL,280.00,283.00,NULL,NULL,'矿化样','DRAFT','现场初步描述：见星点状黄铁矿，待补编号封签',NULL,NULL,'2024-08-18 15:00:00','2024-08-18 15:00:00',0),
+(12,4,'HQ-2404-S01',10.00,12.00,NULL,'FS-2404-01','水样','DRAFT','覆盖层潜水样，取样人未登记',NULL,NULL,'2024-08-08 09:00:00','2024-08-08 09:00:00',0);
+
+-- ---------------------------- 送检批次（4：已接收 / 运输中 / 部分接收 / 已退回） ----------------------------
+INSERT INTO sample_batch (id, batch_no, status, expected_count, received_count, abnormal_count, packer, carrier, pack_note, packed_at, receiver, received_at, receive_note, return_reason, returned_at, lock_version, created_at) VALUES
+(1,'SJ-20240601-01','RECEIVED',3,3,0,'马三保','刘成','木箱铅封，附送样单 1 份','2024-06-01 18:00:00','实验室-吴敏','2024-06-03 15:06:00','数量、封签核对一致，样品完好',NULL,NULL,2,'2024-06-01 18:00:00'),
+(2,'SJ-20240820-01','IN_TRANSIT',2,0,0,'周立军','郑凯','泡沫箱分装，汽运至中心实验室','2024-08-20 07:50:00',NULL,NULL,NULL,NULL,NULL,1,'2024-08-20 07:50:00'),
+(3,'SJ-20240510-01','PARTIAL_RECEIVED',2,1,1,'周立军','郑凯','2 件矿化样分别袋装','2024-05-10 08:00:00','实验室-吴敏','2024-05-12 10:20:00','1 件封签破损，已原样暂存待补封签，其余 1 件正常接收',NULL,NULL,2,'2024-05-10 08:00:00'),
+(4,'SJ-20240625-01','RETURNED',1,0,0,'马三保','外协司机','片麻岩样 1 件','2024-06-25 09:00:00',NULL,NULL,NULL,'送样单缺失且外箱无批次标签，无法核对来源，整批退回补齐手续','2024-06-28 17:30:00',2,'2024-06-25 09:00:00');
+
+-- ---------------------------- 批次样品明细（8 行） ----------------------------
+INSERT INTO sample_batch_item (id, batch_id, sample_id, sample_no, borehole_id, from_depth, to_depth, seal_no, item_status, abnormal_note, received_at, receiver) VALUES
+(1,1,1,'HQ-2401-H01',1,442.00,445.00,'FS-2401-01','RECEIVED',NULL,'2024-06-03 15:06:00','实验室-吴敏'),
+(2,1,2,'HQ-2401-H02',1,480.00,483.00,'FS-2401-02','RECEIVED',NULL,'2024-06-03 15:06:00','实验室-吴敏'),
+(3,1,3,'HQ-2401-H03',1,360.00,363.00,'FS-2401-03','RECEIVED',NULL,'2024-06-03 15:06:00','实验室-吴敏'),
+(4,2,4,'HQ-2403-H01',3,220.00,223.00,'FS-2403-01','PENDING',NULL,NULL,NULL),
+(5,2,5,'HQ-2403-H02',3,150.00,153.00,'FS-2403-02','PENDING',NULL,NULL,NULL),
+(6,3,6,'HQ-3103-H01',7,360.00,363.00,'FS-3103-01','RECEIVED',NULL,'2024-05-12 10:20:00','实验室-吴敏'),
+(7,3,7,'HQ-3103-H02',7,450.00,453.00,'FS-3103-02','ABNORMAL','到达时封签 FS-3103-02 破损，样品可辨，待现场补封签与情况说明',NULL,NULL),
+(8,4,8,'HQ-2402-H01',2,260.00,263.00,'FS-2402-01','RETURNED','送样单缺失、外箱无批次标签，随批退回',NULL,NULL);
+
+-- ---------------------------- 批次交接事件（6 条，只增不改） ----------------------------
+INSERT INTO sample_batch_event (id, batch_id, event_type, event_status, sample_count, received_count, abnormal_count, operator, note, event_at) VALUES
+(1,1,'PACK','IN_TRANSIT',3,0,0,'马三保','封样发运：3 件，木箱铅封','2024-06-01 18:00:00'),
+(2,1,'RECEIVE','RECEIVED',3,3,0,'实验室-吴敏','数量、封签核对一致，全部接收','2024-06-03 15:06:00'),
+(3,2,'PACK','IN_TRANSIT',2,0,0,'周立军','封样发运：2 件，汽运中心实验室','2024-08-20 07:50:00'),
+(4,3,'PACK','IN_TRANSIT',2,0,0,'周立军','封样发运：2 件矿化样','2024-05-10 08:00:00'),
+(5,3,'PARTIAL_RECEIVE','PARTIAL_RECEIVED',2,1,1,'实验室-吴敏','HQ-3103-H01 正常接收；HQ-3103-H02 封签破损，标待补','2024-05-12 10:20:00'),
+(6,4,'PACK','IN_TRANSIT',1,0,0,'马三保','封样发运：1 件','2024-06-25 09:00:00'),
+(7,4,'RETURN','RETURNED',1,0,0,'实验室-吴敏','送样单缺失且外箱无批次标签，整批退回','2024-06-28 17:30:00');

@@ -30,11 +30,20 @@
           <span class="dc-return-hint">正在按交接问题整改，完成后返回交接台保存进度 / 重新提交</span>
         </div>
 
+        <!-- 取样送检从孔资料进入时显示的返回条：返回孔资料，页面内筛选与批次已持久化 -->
+        <div v-if="sampleNav.fromHole && current !== 'sample'" class="dc-return-bar">
+          <el-button size="small" type="primary" plain @click="backToSample">
+            ← 返回取样送检
+          </el-button>
+          <span class="dc-return-hint">正在查看孔资料，取样送检页的筛选条件与当前批次已保留</span>
+        </div>
+
         <HolesView v-if="current === 'holes'" />
         <CoreLogView v-else-if="current === 'core'" />
         <ParamView v-else-if="current === 'param'" />
         <RigView v-else-if="current === 'rig'" />
         <ShiftReportView v-else-if="current === 'report'" />
+        <SampleView v-else-if="current === 'sample'" />
         <KeepAlive>
           <HandoverView v-if="current === 'handover'" ref="handoverRef" />
         </KeepAlive>
@@ -83,11 +92,13 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { detail } from './detail'
 import { handoverNav, exitToHandover } from './handover-nav'
+import { sampleNav, exitToHole } from './sample-nav'
 import HolesView from './views/HolesView.vue'
 import CoreLogView from './views/CoreLogView.vue'
 import ParamView from './views/ParamView.vue'
 import RigView from './views/RigView.vue'
 import ShiftReportView from './views/ShiftReportView.vue'
+import SampleView from './views/SampleView.vue'
 import HandoverView from './views/HandoverView.vue'
 
 const tabs = [
@@ -96,6 +107,7 @@ const tabs = [
   { key: 'param', title: '钻进参数' },
   { key: 'rig', title: '钻机班组' },
   { key: 'report', title: '班报表' },
+  { key: 'sample', title: '取样送检' },
   { key: 'handover', title: '终孔交接' }
 ]
 
@@ -151,6 +163,12 @@ async function backToHandover() {
   const ctx = exitToHandover()
   current.value = 'handover'
   await handoverRef.value?.restoreContext(ctx)
+}
+
+/** 从孔资料返回取样送检页（筛选条件 / 当前批次由页面 localStorage 自行恢复） */
+function backToSample() {
+  exitToHole()
+  current.value = 'sample'
 }
 
 onMounted(() => {
