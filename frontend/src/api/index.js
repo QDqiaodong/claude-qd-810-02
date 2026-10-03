@@ -80,5 +80,22 @@ export const api = {
   resubmitHandover: (id, body) => unwrap(http.post(`/handovers/${id}/resubmit`, body || {})),
   rejectHandover: (id, body) => unwrap(http.post(`/handovers/${id}/reject`, body)),
   acceptHandover: (id, body) => unwrap(http.post(`/handovers/${id}/accept`, body || {})),
-  reopenHandover: (id, body) => unwrap(http.post(`/handovers/${id}/reopen`, body))
+  reopenHandover: (id, body) => unwrap(http.post(`/handovers/${id}/reopen`, body)),
+
+  // 岩芯样品取样登记
+  samples: (params) => unwrap(http.get('/samples', qs(params))),
+  createSample: (body) => unwrap(http.post('/samples', body)),
+  updateSample: (id, body) => unwrap(http.put(`/samples/${id}`, body)),
+  deleteSample: (id) => unwrap(http.delete(`/samples/${id}`)),
+
+  // 送检批次（封样运输 → 实验室接收）
+  sampleBatches: (status) => unwrap(http.get('/sample-batches', qs(status ? { status } : {}))),
+  sampleBatchDetail: (id) => unwrap(http.get(`/sample-batches/${id}`)),
+  createSampleBatch: (body) => unwrap(http.post('/sample-batches', body)),
+  batchAddSamples: (id, body) => unwrap(http.post(`/sample-batches/${id}/samples`, body)),
+  batchRemoveSample: (id, sampleId, body) => unwrap(http.delete(`/sample-batches/${id}/samples/${sampleId}`, { data: body || {} })),
+  disbandBatch: (id, body) => unwrap(http.delete(`/sample-batches/${id}`, { data: body || {} })),
+  handoverBatch: (id, body) => unwrap(http.post(`/sample-batches/${id}/handover`, body)),
+  returnBatch: (id, body) => unwrap(http.post(`/sample-batches/${id}/return`, body)),
+  receiveBatch: (id, body) => unwrap(http.post(`/sample-batches/${id}/receive`, body))
 }

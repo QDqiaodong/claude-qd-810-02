@@ -12,6 +12,9 @@ CREATE DATABASE IF NOT EXISTS drill_crew
   DEFAULT COLLATE utf8mb4_unicode_ci;
 USE drill_crew;
 
+DROP TABLE IF EXISTS sample_batch_event;
+DROP TABLE IF EXISTS sample_batch;
+DROP TABLE IF EXISTS core_sample;
 DROP TABLE IF EXISTS handover_issue;
 DROP TABLE IF EXISTS handover;
 DROP TABLE IF EXISTS shift_report;
@@ -210,6 +213,77 @@ CREATE TABLE handover_issue (
   PRIMARY KEY (id),
   KEY idx_issue_handover (handover_id),
   KEY idx_issue_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------- 11. 岩芯样品 ----------------------------
+-- 取样登记：样品编号与封签号全局唯一（草稿允许暂缺，NULL 不参与唯一冲突）。
+-- 同一钻孔内孔段 [from_depth, to_depth) 不允许重叠（服务层校验）。
+-- status：DRAFT 草稿 / READY 待送检 / PACKED 已装批 / SHIPPED 在途 /
+--         RECEIVED 已接收 / PENDING_FIX 待补（实验室判定异常）/ RETURNED 已退回
+CREATE TABLE core_sample (
+  id           BIGINT       NOT NULL AUTO_INCREMENT,
+  borehole_id  BIGINT       NOT NULL COMMENT '所属钻孔',
+  sample_no    VARCHAR(40)  DEFAULT NULL COMMENT '样品编号（唯一，草稿可暂缺）',
+  seal_no      VARCHAR(40)  DEFAULT NULL COMMENT '封签号（唯一，草稿可暂缺）',
+  from_depth   DECIMAL(8,2) DEFAULT NULL COMMENT '取样起深 m',
+  to_depth     DECIMAL(8,2) DEFAULT NULL COMMENT '取样止深 m',
+  sampler      VARCHAR(32)  DEFAULT NULL COMMENT '取样人',
+  sampled_at   DATE         DEFAULT NULL COMMENT '取样日期',
+  status       VARCHAR(12)  NOT NULL COMMENT '草稿/待送检/已装批/在途/已接收/待补/已退回',
+  batch_id     BIGINT       DEFAULT NULL COMMENT '所属送检批次',
+  receive_note VARCHAR(255) DEFAULT NULL COMMENT '实验室验收说明（异常原因）',
+  received_at  DATETIME     DEFAULT NULL COMMENT '实验室接收时间（回写）',
+  remark       VARCHAR(255) DEFAULT NULL,
+  created_at   DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  updated_at   DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_sample_no (sample_no),
+  UNIQUE KEY uk_sample_seal (seal_no),
+  KEY idx_sample_hole (borehole_id),
+  KEY idx_sample_batch (batch_id),
+  KEY idx_sample_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------- 12. 送检批次 ----------------------------
+-- 批次状态：PACKING 封样中 / SHIPPED 在途 / RECEIVED 已接收 / PARTIAL 部分接收 / RETURNED 已退回。
+-- 交接瞬间把样品数量与封签清单固化为快照，实验室接收时据此核对「数量、封签一致」；
+-- lock_version 乐观锁 + 状态机约束保证重复点击交接 / 接收不会产生重复记录。
+CREATE TABLE sample_batch (
+  id             BIGINT       NOT NULL AUTO_INCREMENT,
+  batch_no       VARCHAR(40)  NOT NULL COMMENT '批次号（唯一）',
+  status         VARCHAR(12)  NOT NULL COMMENT '封样中/在途/已接收/部分接收/已退回',
+  sample_count   INT          NOT NULL DEFAULT 0 COMMENT '交接时样品数量快照',
+  seal_digest    VARCHAR(255) DEFAULT NULL COMMENT '交接时封签号清单快照',
+  packed_by      VARCHAR(32)  DEFAULT NULL COMMENT '封样人',
+  handed_by      VARCHAR(32)  DEFAULT NULL COMMENT '交出人',
+  handed_at      DATETIME     DEFAULT NULL COMMENT '交接时间',
+  transport_note VARCHAR(255) DEFAULT NULL COMMENT '运输说明（车辆/押运）',
+  received_by    VARCHAR(32)  DEFAULT NULL COMMENT '实验室接收人',
+  received_at    DATETIME     DEFAULT NULL COMMENT '最近接收时间',
+  received_count INT          NOT NULL DEFAULT 0 COMMENT '累计实收样品数',
+  exception_note VARCHAR(255) DEFAULT NULL COMMENT '异常说明 / 待补项',
+  return_reason  VARCHAR(255) DEFAULT NULL COMMENT '整批退回原因',
+  lock_version   INT          NOT NULL DEFAULT 0 COMMENT '乐观锁',
+  created_at     DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_batch_no (batch_no),
+  KEY idx_batch_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------- 13. 送检批次流转记录 ----------------------------
+-- 每次封样 / 交接 / 接收 / 部分接收 / 补接收 / 整批退回都落一条记录，
+-- detail 为当时的样品明细快照（JSON），历史交接结果可据此追溯。
+CREATE TABLE sample_batch_event (
+  id         BIGINT       NOT NULL AUTO_INCREMENT,
+  batch_id   BIGINT       NOT NULL COMMENT '所属批次',
+  event_type VARCHAR(16)  NOT NULL COMMENT 'PACK/HANDOVER/RECEIVE/PARTIAL/SUPPLEMENT/RETURN',
+  operator   VARCHAR(32)  DEFAULT NULL COMMENT '操作人',
+  event_at   DATETIME     NOT NULL COMMENT '发生时间',
+  note       VARCHAR(255) DEFAULT NULL COMMENT '说明（退回原因 / 异常说明 / 待补项）',
+  detail     JSON         DEFAULT NULL COMMENT '当时样品明细快照',
+  created_at DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_event_batch (batch_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 SET FOREIGN_KEY_CHECKS = 1;
@@ -593,3 +667,40 @@ INSERT INTO shift_report (borehole_id, rig_id, crew_id, report_date, shift_type,
 (12,6,8,'2024-07-11','中', 22.30, 5.80, 1.60,'无事故，封孔前最后一个班',
  '[{"category":"钻头","name":"金刚石钻头","spec":"Φ75 mm","qty":1,"unit":"个"},{"category":"泥浆材料","name":"水泥","spec":"P.O 42.5","qty":10,"unit":"袋"}]',
  '已达设计孔深，准备封孔，封孔材料已到位','刘铁柱');
+
+-- ---------------------------- 岩芯样品（8） ----------------------------
+-- ZK-2401：2 件已接收（批次1）、1 件已接收 + 1 件待补（批次2，部分接收）
+INSERT INTO core_sample (id, borehole_id, sample_no, seal_no, from_depth, to_depth, sampler, sampled_at, status, batch_id, receive_note, received_at, remark) VALUES
+(1,1,'ZK2401-H01','FQ-2024-001', 12.50, 15.00,'刘铁柱','2024-09-08','RECEIVED',1,NULL,'2024-09-11 14:20:00','覆盖层顶板样'),
+(2,1,'ZK2401-H02','FQ-2024-002', 86.80, 88.00,'刘铁柱','2024-09-08','RECEIVED',1,NULL,'2024-09-11 14:20:00','砂岩含水性样'),
+(3,1,'ZK2401-H03','FQ-2024-003',173.60,175.10,'马三保','2024-09-14','RECEIVED',2,NULL,'2024-09-16 09:10:00','安山岩光谱样'),
+(4,1,'ZK2401-H04','FQ-2024-004',390.50,392.00,'马三保','2024-09-14','PENDING_FIX',2,'封签不一致：登记 FQ-2024-004 / 实收 FQ-2024-04',NULL,'石英脉化学分析样'),
+-- ZK-2402：1 件已装批（批次3 封样中）、1 件待送检
+(5,2,'ZK2402-H01','FQ-2024-005', 18.60, 20.00,'刘铁柱','2024-09-19','PACKED',3,NULL,NULL,'大理岩薄片样'),
+(6,2,'ZK2402-H02','FQ-2024-006',121.50,123.00,'马三保','2024-09-19','READY',NULL,NULL,NULL,'大理岩力学样'),
+-- ZK-2403（施工中）：1 件待送检、1 件草稿（缺封签号）
+(7,3,'ZK2403-H01','FQ-2024-007',104.30,105.50,'周立军','2024-09-21','READY',NULL,NULL,NULL,'砂岩孔隙度样'),
+(8,3,'ZK2403-H02',NULL,208.60,210.00,'周立军','2024-09-21','DRAFT',NULL,NULL,NULL,'花岗岩样，封签待补贴');
+
+-- ---------------------------- 送检批次（3） ----------------------------
+INSERT INTO sample_batch (id, batch_no, status, sample_count, seal_digest, packed_by, handed_by, handed_at, transport_note, received_by, received_at, received_count, exception_note, return_reason, lock_version) VALUES
+(1,'SJ-20240910-001','RECEIVED',2,'FQ-2024-001,FQ-2024-002','刘铁柱','刘铁柱','2024-09-10 09:30:00','专车押运 甘F-62183','陈化验','2024-09-11 14:20:00',2,NULL,NULL,2),
+(2,'SJ-20240915-002','PARTIAL',2,'FQ-2024-003,FQ-2024-004','马三保','马三保','2024-09-15 10:00:00','随车押运 甘F-62077','陈化验','2024-09-16 09:10:00',1,'待补 1 件：ZK2401-H04（封签不一致：登记 FQ-2024-004 / 实收 FQ-2024-04）',NULL,2),
+(3,'SJ-20240920-003','PACKING',1,NULL,'刘铁柱',NULL,NULL,'专车押运 甘F-62183',NULL,NULL,0,NULL,NULL,0);
+
+-- ---------------------------- 送检批次流转记录 ----------------------------
+INSERT INTO sample_batch_event (batch_id, event_type, operator, event_at, note, detail) VALUES
+(1,'PACK','刘铁柱','2024-09-10 08:40:00','封样 2 件',
+ '[{"sampleId":1,"sampleNo":"ZK2401-H01","sealNo":"FQ-2024-001","fromDepth":12.50,"toDepth":15.00},{"sampleId":2,"sampleNo":"ZK2401-H02","sealNo":"FQ-2024-002","fromDepth":86.80,"toDepth":88.00}]'),
+(1,'HANDOVER','刘铁柱','2024-09-10 09:30:00','专车押运 甘F-62183',
+ '[{"sampleId":1,"sampleNo":"ZK2401-H01","sealNo":"FQ-2024-001","fromDepth":12.50,"toDepth":15.00},{"sampleId":2,"sampleNo":"ZK2401-H02","sealNo":"FQ-2024-002","fromDepth":86.80,"toDepth":88.00}]'),
+(1,'RECEIVE','陈化验','2024-09-11 14:20:00','数量、封签一致，全部接收',
+ '[{"sampleId":1,"sampleNo":"ZK2401-H01","sealNo":"FQ-2024-001","fromDepth":12.50,"toDepth":15.00,"result":"RECEIVED"},{"sampleId":2,"sampleNo":"ZK2401-H02","sealNo":"FQ-2024-002","fromDepth":86.80,"toDepth":88.00,"result":"RECEIVED"}]'),
+(2,'PACK','马三保','2024-09-15 09:20:00','封样 2 件',
+ '[{"sampleId":3,"sampleNo":"ZK2401-H03","sealNo":"FQ-2024-003","fromDepth":173.60,"toDepth":175.10},{"sampleId":4,"sampleNo":"ZK2401-H04","sealNo":"FQ-2024-004","fromDepth":390.50,"toDepth":392.00}]'),
+(2,'HANDOVER','马三保','2024-09-15 10:00:00','随车押运 甘F-62077',
+ '[{"sampleId":3,"sampleNo":"ZK2401-H03","sealNo":"FQ-2024-003","fromDepth":173.60,"toDepth":175.10},{"sampleId":4,"sampleNo":"ZK2401-H04","sealNo":"FQ-2024-004","fromDepth":390.50,"toDepth":392.00}]'),
+(2,'PARTIAL','陈化验','2024-09-16 09:10:00','待补 1 件：ZK2401-H04（封签不一致：登记 FQ-2024-004 / 实收 FQ-2024-04）',
+ '[{"sampleId":3,"sampleNo":"ZK2401-H03","sealNo":"FQ-2024-003","fromDepth":173.60,"toDepth":175.10,"result":"RECEIVED"},{"sampleId":4,"sampleNo":"ZK2401-H04","sealNo":"FQ-2024-004","fromDepth":390.50,"toDepth":392.00,"result":"PENDING_FIX","note":"封签不一致：登记 FQ-2024-004 / 实收 FQ-2024-04"}]'),
+(3,'PACK','刘铁柱','2024-09-20 11:10:00','封样 1 件',
+ '[{"sampleId":5,"sampleNo":"ZK2402-H01","sealNo":"FQ-2024-005","fromDepth":18.60,"toDepth":20.00}]');

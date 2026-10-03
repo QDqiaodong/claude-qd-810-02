@@ -30,11 +30,22 @@
           <span class="dc-return-hint">正在按交接问题整改，完成后返回交接台保存进度 / 重新提交</span>
         </div>
 
+        <!-- 样品送检页跳到孔资料时显示的返回条：返回后保留当前批次与筛选条件 -->
+        <div v-if="sampleNav.fromSamples && current !== 'samples'" class="dc-return-bar">
+          <el-button size="small" type="primary" plain @click="backToSamples">
+            ← 返回样品送检{{ sampleNav.batchNo ? '（批次 ' + sampleNav.batchNo + '）' : '' }}
+          </el-button>
+          <span class="dc-return-hint">当前批次与筛选条件已保留，返回后继续封样 / 接收</span>
+        </div>
+
         <HolesView v-if="current === 'holes'" />
         <CoreLogView v-else-if="current === 'core'" />
         <ParamView v-else-if="current === 'param'" />
         <RigView v-else-if="current === 'rig'" />
         <ShiftReportView v-else-if="current === 'report'" />
+        <KeepAlive>
+          <SampleView v-if="current === 'samples'" />
+        </KeepAlive>
         <KeepAlive>
           <HandoverView v-if="current === 'handover'" ref="handoverRef" />
         </KeepAlive>
@@ -83,11 +94,13 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { detail } from './detail'
 import { handoverNav, exitToHandover } from './handover-nav'
+import { sampleNav, exitToSamples } from './sample-nav'
 import HolesView from './views/HolesView.vue'
 import CoreLogView from './views/CoreLogView.vue'
 import ParamView from './views/ParamView.vue'
 import RigView from './views/RigView.vue'
 import ShiftReportView from './views/ShiftReportView.vue'
+import SampleView from './views/SampleView.vue'
 import HandoverView from './views/HandoverView.vue'
 
 const tabs = [
@@ -96,6 +109,7 @@ const tabs = [
   { key: 'param', title: '钻进参数' },
   { key: 'rig', title: '钻机班组' },
   { key: 'report', title: '班报表' },
+  { key: 'samples', title: '样品送检' },
   { key: 'handover', title: '终孔交接' }
 ]
 
@@ -151,6 +165,12 @@ async function backToHandover() {
   const ctx = exitToHandover()
   current.value = 'handover'
   await handoverRef.value?.restoreContext(ctx)
+}
+
+/** 从孔资料返回样品送检：KeepAlive 保留了【当前批次】与【筛选条件】 */
+function backToSamples() {
+  exitToSamples()
+  current.value = 'samples'
 }
 
 onMounted(() => {

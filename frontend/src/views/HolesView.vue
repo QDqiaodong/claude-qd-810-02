@@ -134,6 +134,7 @@ import { ElMessage } from 'element-plus'
 import { api } from '../api'
 import { setDetail } from '../detail'
 import { openHandoverForHole } from '../handover-nav'
+import { sampleNav } from '../sample-nav'
 
 const mines = ref([])
 const stats = ref([])
@@ -248,6 +249,17 @@ onMounted(async () => {
   mines.value = await api.mines()
   if (mines.value.length) mineId.value = mines.value[0].id
   await loadStats()
+  // 从样品送检页「孔资料」跳入：切到该孔所在矿区并选中
+  if (sampleNav.fromSamples && sampleNav.boreholeId) {
+    try {
+      const hole = await api.borehole(sampleNav.boreholeId)
+      mineId.value = hole.mineId
+      await loadHoles()
+      const target = holes.value.find((h) => h.id === hole.id)
+      if (target) select(target)
+      return
+    } catch (e) { /* 孔可能已删除，落到默认列表 */ }
+  }
   await loadHoles()
 })
 </script>
